@@ -1,7 +1,6 @@
 Table,Description
 Category,"Stores product category details, including unique category ID, category name, and a textual description that classifies products into logical groups."
 Customer,"Contains detailed customer information such as unique customer ID, company name, contact person’s name and title, full address (street, city, region, postal code, country), phone and fax numbers."
-CustomerCustomerDemo,"Associative linking table connecting customers to their demographic segments, mapping customer IDs to customer type IDs for classification."
 CustomerDemographic,"Defines customer demographic types or market segments, with a unique ID and a descriptive field outlining the characteristics of each customer group."
 Employee,"Stores company employee records, including employee ID, names (first and last), job title, courtesy title, birth and hire dates, contact information, address, manager (ReportsTo), and notes."
 EmployeeTerritory,"Maps employees to the sales territories they are responsible for, linking employee IDs with territory IDs to define coverage areas."

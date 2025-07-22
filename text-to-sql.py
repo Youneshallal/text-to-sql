@@ -3,22 +3,120 @@ import re
 import pandas as pd
 import streamlit as st
 
+import numpy as np
+
 from sqlalchemy import create_engine, inspect
 from langchain_ollama.llms import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
 
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+
+
 # Initialize the LLaMA3 model through Ollama
-model = OllamaLLM(model="llama3")
+model = OllamaLLM(model="llama3:latest")
+# Load embedding model once
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Define your database
 db_url = "sqlite:///northwind_small.sqlite"
 
 # SQL generation prompt template
 sql_prompt_template = """
-You are a SQL generator. Given a schema and a user question, you MUST output ONLY a valid SQL query if possible.No explanation is needed.
-If the question is irrelevant to the schema or cannot be answered with it, return exactly: please ask again
+You are a SQL generator. Given a database schema and a user question, your task is to output ONLY a valid **SQLite** SQL query that correctly answers the question using the schema. 
+
+❗Rules you MUST follow:
+- Output ONLY SQL code, and nothing else.
+- Use ONLY the tables and columns that are **explicitly defined** in the provided schema.
+- If a table or column required to answer the question is missing from the schema, return EXACTLY: please ask again
+- If the question is irrelevant to the schema or impossible to answer with the available data, return EXACTLY: please ask again
+- Never assume columns or tables that are not listed. Be strict.
+
+🧠 Tip: Always read the schema carefully before generating the query.
 
 Examples:
+
+Schema:
+{{ "Employee": ["Id", "FirstName", "LastName"], "EmployeeTerritory": ["EmployeeId", "TerritoryId"], "Territory": ["Id", "RegionId"], "Region": ["Id", "RegionDescription"] }}
+User question:
+Which employees work in territories that belong to the 'Western' region?
+Output:
+SELECT e.FirstName, e.LastName
+FROM Employee e
+JOIN EmployeeTerritory et ON e.Id = et.EmployeeId
+JOIN Territory t ON et.TerritoryId = t.Id
+JOIN Region r ON t.RegionId = r.Id
+WHERE r.RegionDescription = 'Western';
+
+Schema:
+{{ "Customer": ["Id", "CompanyName", "Country"], "Order": ["Id", "CustomerId", "OrderDate", "ShipVia"], "Shipper": ["Id", "CompanyName"] }}
+User question:
+Show customers who placed more than 10 orders in 1998 that were shipped by 'Federal Shipping'.
+Output:
+SELECT c.CompanyName, COUNT(o.Id) AS OrderCount
+FROM Customer c
+JOIN Order o ON c.Id = o.CustomerId
+JOIN Shipper s ON o.ShipVia = s.Id
+WHERE o.OrderDate >= '1998-01-01' AND o.OrderDate < '1999-01-01'
+AND s.CompanyName = 'Federal Shipping'
+GROUP BY c.CompanyName
+HAVING COUNT(o.Id) > 10;
+
+Schema:
+{{ "Supplier": ["Id", "CompanyName"], "Product": ["Id", "SupplierId", "ProductName", "UnitsInStock", "CategoryId"], "Category": ["Id", "CategoryName"] }}
+User question:
+List suppliers who provide products in the 'Beverages' category that are currently out of stock.
+Output:
+SELECT s.CompanyName
+FROM Supplier s
+JOIN Product p ON s.Id = p.SupplierId
+JOIN Category c ON p.CategoryId = c.Id
+WHERE c.CategoryName = 'Beverages' AND p.UnitsInStock = 0;
+
+Schema:
+{{ "Order": ["Id", "CustomerId", "OrderDate"], "OrderDetail": ["OrderId", "ProductId", "UnitPrice", "Quantity", "Discount"], "Product": ["Id", "ProductName", "CategoryId"], "Category": ["Id", "CategoryName"], "Customer": ["Id", "CompanyName", "Country"] }}
+User question:
+Find customers from Germany who spent more than $10,000 in total on 'Seafood' products in 1997.
+Output:
+SELECT c.CompanyName, SUM(od.UnitPrice * od.Quantity * (1 - od.Discount)) AS TotalSpent
+FROM Customer c
+JOIN Order o ON c.Id = o.CustomerId
+JOIN OrderDetail od ON o.Id = od.OrderId
+JOIN Product p ON od.ProductId = p.Id
+JOIN Category cat ON p.CategoryId = cat.Id
+WHERE c.Country = 'Germany'
+AND cat.CategoryName = 'Seafood'
+AND o.OrderDate >= '1997-01-01' AND o.OrderDate < '1998-01-01'
+GROUP BY c.CompanyName
+HAVING TotalSpent > 10000;
+
+Schema:
+{{ "Employee": ["Id", "FirstName", "LastName", "Title"], "Order": ["Id", "EmployeeId", "OrderDate"], "OrderDetail": ["OrderId", "ProductId", "Quantity"], "Product": ["Id", "ProductName", "CategoryId"], "Category": ["Id", "CategoryName"] }}
+User question:
+Which employees handled orders that included products from the 'Confections' category in the year 1996?
+Output:
+SELECT DISTINCT e.FirstName, e.LastName
+FROM Employee e
+JOIN Order o ON e.Id = o.EmployeeId
+JOIN OrderDetail od ON o.Id = od.OrderId
+JOIN Product p ON od.ProductId = p.Id
+JOIN Category c ON p.CategoryId = c.Id
+WHERE c.CategoryName = 'Confections'
+AND o.OrderDate >= '1996-01-01' AND o.OrderDate < '1997-01-01';
+
+Schema:
+{{ "Customer": ["Id", "CompanyName"], "Order": ["Id", "CustomerId", "OrderDate"], "OrderDetail": ["OrderId", "ProductId", "Quantity"], "Product": ["Id", "ProductName", "SupplierId"], "Supplier": ["Id", "CompanyName"] }}
+User question:
+List customers who ordered products from at least 3 different suppliers in 1999.
+Output:
+SELECT c.CompanyName
+FROM Customer c
+JOIN Order o ON c.Id = o.CustomerId
+JOIN OrderDetail od ON o.Id = od.OrderId
+JOIN Product p ON od.ProductId = p.Id
+WHERE o.OrderDate >= '1999-01-01' AND o.OrderDate < '2000-01-01'
+GROUP BY c.CompanyName
+HAVING COUNT(DISTINCT p.SupplierId) >= 3;
 
 Schema:
 {{ "Customer": ["Id", "CompanyName", "Country"], "Order": ["Id", "CustomerId"] }}
@@ -49,7 +147,7 @@ FROM Customer c
 JOIN Order o ON c.Id = o.CustomerId
 JOIN Shipper s ON o.ShipVia = s.Id
 WHERE o.OrderDate >= '1997-01-01' AND o.OrderDate < '1998-01-01'
-AND s.CompanyName = 'Speedy Express'
+  AND s.CompanyName = 'Speedy Express'
 GROUP BY c.CompanyName, c.Country
 HAVING COUNT(o.Id) > 5;
 
@@ -78,6 +176,8 @@ JOIN OrderDetail od ON o.Id = od.OrderId
 GROUP BY c.CompanyName
 ORDER BY TotalAmount DESC
 LIMIT 3;
+
+-------------------------
 
 Schema:
 {schema}
@@ -126,99 +226,27 @@ def get_table_details():
         details += f"Table Name: {row['Table']}\nDescription: {row['Description']}\n\n"
     return details
 
+def get_table_embeddings():
+    df = pd.read_csv("database_table_descriptions.csv")
+    tables = df["Table"].tolist()
+    descriptions = df["Description"].tolist()
+    vectors = embedding_model.encode(descriptions)
+    return list(zip(tables, descriptions, vectors))
 
-# Ask LLaMA3 to return a JSON list of relevant table names
-def get_relevant_tables(question: str, table_details: str) -> list[str]:
-    prompt = f"""
-You are a precise and helpful assistant specialized in selecting ONLY the relevant SQL tables needed to answer a user's question.
 
-Below are some examples:
 
-User Question:
-List all customers along with the number of orders they placed.
+def get_relevant_tables_semantic(query: str, table_info: list, top_k: int = 7, threshold: float = 0.45) -> list[str]:
+    query_vector = embedding_model.encode([query])[0]
 
-Relevant Tables:
-["Customer", "Order"]
+    scores = []
+    for table_name, description, vector in table_info:
+        similarity = cosine_similarity([query_vector], [vector])[0][0]
+        if similarity >= threshold:  #  Only include if above threshold
+            scores.append((table_name, similarity))
 
-User Question:
-Show the names and countries of all customers who placed more than 5 orders in 1997, where at least one of their orders was shipped by 'Speedy Express'.
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return [name for name, _ in scores[:top_k]]
 
-Relevant Tables:
-["Customer", "Order", "Shipper"]
-
-User Question:
-Which employees work in territories that belong to the 'Western' region?
-
-Relevant Tables:
-["Employee", "EmployeeTerritory", "Territory", "Region"]
-
-User Question:
-List the top 3 customers by total purchase amount.
-
-Relevant Tables:
-["Customer", "Order", "OrderDetail"]
-
-User Question:
-List the names of products that are currently out of stock.
-
-Relevant Tables:
-["Product"]
-
-User Question:
-Show each product's name, its category, and the supplier company.
-
-Relevant Tables:
-["Product", "Category", "Supplier"]
-
-User Question:
-Which employees have not handled any orders?
-
-Relevant Tables:
-["Employee", "Order"]
-
-User Question:
-List the names of shippers and how many orders they have shipped.
-
-Relevant Tables:
-["Order", "Shipper"]
-
-User Question:
-Find the names of customers who ordered products from the 'Seafood' category.
-
-Relevant Tables:
-["Customer", "Order", "OrderDetail", "Product", "Category"]
-
-User Question:
-Get the average unit price of all products supplied by each supplier.
-
-Relevant Tables:
-["Product", "Supplier"]
-
-Now, your task:
-
-User Question:
-{question}
-
-Below are the available tables with their descriptions:
-{table_details}
-
-Return ONLY a JSON array (list) of table names relevant to answering the question.
-Use exact table names as given.
-Do NOT include any explanation, comments, or extra text.
-If no table is relevant, return an empty JSON array [].
-
-Respond with ONLY the JSON array.
-"""
-    response = model.invoke(prompt)
-
-    try:
-        tables = json.loads(response.strip())
-        if isinstance(tables, list) and all(isinstance(t, str) for t in tables):
-            return tables
-    except json.JSONDecodeError:
-        pass
-
-    return []
 
 
 
@@ -272,13 +300,23 @@ with st.expander("💡 Suggested Prompts", expanded=True):
         if cols[i].button(question):
             st.session_state.query_input = question
 
+if st.button("🗑️ Clear Chat History"):
+    st.session_state.history = []
+
 # Text input
 user_query = st.chat_input("Describe what data you want...")
 
+# If user clicked a suggestion, use it as the input
+if not user_query and "query_input" in st.session_state:
+    user_query = st.session_state.query_input
+    del st.session_state.query_input  # Clean it so it doesn't re-trigger every run
+
+
 if user_query:
     st.session_state.history.append(("user", user_query))
-    table_details = get_table_details()
-    relevant_tables = get_relevant_tables(user_query, table_details)
+    table_info = get_table_embeddings()
+    relevant_tables = get_relevant_tables_semantic(user_query, table_info, threshold=0.2)
+
 
     if not relevant_tables:
         st.session_state.history.append(("assistant", "⚠️ Could not detect relevant tables. Try rephrasing your question."))

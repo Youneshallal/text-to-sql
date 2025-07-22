@@ -9,10 +9,7 @@ data = [
         "Customer",
         "Contains detailed customer information such as unique customer ID, company name, contact person’s name and title, full address (street, city, region, postal code, country), phone and fax numbers."
     ),
-    (
-        "CustomerCustomerDemo",
-        "Associative linking table connecting customers to their demographic segments, mapping customer IDs to customer type IDs for classification."
-    ),
+
     (
         "CustomerDemographic",
         "Defines customer demographic types or market segments, with a unique ID and a descriptive field outlining the characteristics of each customer group."
