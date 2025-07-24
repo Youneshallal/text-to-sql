@@ -6,188 +6,50 @@ import streamlit as st
 import numpy as np
 
 from sqlalchemy import create_engine, inspect
-from langchain_ollama.llms import OllamaLLM
-from langchain_core.prompts import ChatPromptTemplate
+
 
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+import google.generativeai as genai
 
-# Initialize the LLaMA3 model through Ollama
-model = OllamaLLM(model="llama3:latest")
-# Load embedding model once
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+st.set_page_config(page_title="NL to SQL", layout="wide")
+
+# Make sure to set your real API key here
+GOOGLE_API_KEY = "AIzaSyDaR3Qhiv6uHhhpzyxocOMYmr68UvpsZwM"
+genai.configure(api_key=GOOGLE_API_KEY)
+
+model = genai.GenerativeModel(model_name='gemini-2.5-pro')
+
+@st.cache_resource
+def load_embedding_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+embedding_model = load_embedding_model()
+
 
 # Define your database
 db_url = "sqlite:///northwind_small.sqlite"
 
 # SQL generation prompt template
 sql_prompt_template = """
-You are a SQL generator. Given a database schema and a user question, your task is to output ONLY a valid **SQLite** SQL query that correctly answers the question using the schema. 
+You are a senior database engineer. Your task is to write a syntactically correct and optimized SQL query using the provided database schema and the user's question.
 
-❗Rules you MUST follow:
-- Output ONLY SQL code, and nothing else.
-- Use ONLY the tables and columns that are **explicitly defined** in the provided schema.
-- If a table or column required to answer the question is missing from the schema, return EXACTLY: please ask again
-- If the question is irrelevant to the schema or impossible to answer with the available data, return EXACTLY: please ask again
-- Never assume columns or tables that are not listed. Be strict.
+Please follow these rules:
+1. Use only the table and column names that are explicitly listed in the schema below.
+2. Do not make up any tables or columns.
+3. Do not explain the query or add any commentary — just return the raw SQL query.
+4. If aggregation is needed, make sure to use appropriate `GROUP BY` clauses.
+5. Format the SQL query nicely across multiple lines.
 
-🧠 Tip: Always read the schema carefully before generating the query.
-
-Examples:
-
-Schema:
-{{ "Employee": ["Id", "FirstName", "LastName"], "EmployeeTerritory": ["EmployeeId", "TerritoryId"], "Territory": ["Id", "RegionId"], "Region": ["Id", "RegionDescription"] }}
-User question:
-Which employees work in territories that belong to the 'Western' region?
-Output:
-SELECT e.FirstName, e.LastName
-FROM Employee e
-JOIN EmployeeTerritory et ON e.Id = et.EmployeeId
-JOIN Territory t ON et.TerritoryId = t.Id
-JOIN Region r ON t.RegionId = r.Id
-WHERE r.RegionDescription = 'Western';
-
-Schema:
-{{ "Customer": ["Id", "CompanyName", "Country"], "Order": ["Id", "CustomerId", "OrderDate", "ShipVia"], "Shipper": ["Id", "CompanyName"] }}
-User question:
-Show customers who placed more than 10 orders in 1998 that were shipped by 'Federal Shipping'.
-Output:
-SELECT c.CompanyName, COUNT(o.Id) AS OrderCount
-FROM Customer c
-JOIN Order o ON c.Id = o.CustomerId
-JOIN Shipper s ON o.ShipVia = s.Id
-WHERE o.OrderDate >= '1998-01-01' AND o.OrderDate < '1999-01-01'
-AND s.CompanyName = 'Federal Shipping'
-GROUP BY c.CompanyName
-HAVING COUNT(o.Id) > 10;
-
-Schema:
-{{ "Supplier": ["Id", "CompanyName"], "Product": ["Id", "SupplierId", "ProductName", "UnitsInStock", "CategoryId"], "Category": ["Id", "CategoryName"] }}
-User question:
-List suppliers who provide products in the 'Beverages' category that are currently out of stock.
-Output:
-SELECT s.CompanyName
-FROM Supplier s
-JOIN Product p ON s.Id = p.SupplierId
-JOIN Category c ON p.CategoryId = c.Id
-WHERE c.CategoryName = 'Beverages' AND p.UnitsInStock = 0;
-
-Schema:
-{{ "Order": ["Id", "CustomerId", "OrderDate"], "OrderDetail": ["OrderId", "ProductId", "UnitPrice", "Quantity", "Discount"], "Product": ["Id", "ProductName", "CategoryId"], "Category": ["Id", "CategoryName"], "Customer": ["Id", "CompanyName", "Country"] }}
-User question:
-Find customers from Germany who spent more than $10,000 in total on 'Seafood' products in 1997.
-Output:
-SELECT c.CompanyName, SUM(od.UnitPrice * od.Quantity * (1 - od.Discount)) AS TotalSpent
-FROM Customer c
-JOIN Order o ON c.Id = o.CustomerId
-JOIN OrderDetail od ON o.Id = od.OrderId
-JOIN Product p ON od.ProductId = p.Id
-JOIN Category cat ON p.CategoryId = cat.Id
-WHERE c.Country = 'Germany'
-AND cat.CategoryName = 'Seafood'
-AND o.OrderDate >= '1997-01-01' AND o.OrderDate < '1998-01-01'
-GROUP BY c.CompanyName
-HAVING TotalSpent > 10000;
-
-Schema:
-{{ "Employee": ["Id", "FirstName", "LastName", "Title"], "Order": ["Id", "EmployeeId", "OrderDate"], "OrderDetail": ["OrderId", "ProductId", "Quantity"], "Product": ["Id", "ProductName", "CategoryId"], "Category": ["Id", "CategoryName"] }}
-User question:
-Which employees handled orders that included products from the 'Confections' category in the year 1996?
-Output:
-SELECT DISTINCT e.FirstName, e.LastName
-FROM Employee e
-JOIN Order o ON e.Id = o.EmployeeId
-JOIN OrderDetail od ON o.Id = od.OrderId
-JOIN Product p ON od.ProductId = p.Id
-JOIN Category c ON p.CategoryId = c.Id
-WHERE c.CategoryName = 'Confections'
-AND o.OrderDate >= '1996-01-01' AND o.OrderDate < '1997-01-01';
-
-Schema:
-{{ "Customer": ["Id", "CompanyName"], "Order": ["Id", "CustomerId", "OrderDate"], "OrderDetail": ["OrderId", "ProductId", "Quantity"], "Product": ["Id", "ProductName", "SupplierId"], "Supplier": ["Id", "CompanyName"] }}
-User question:
-List customers who ordered products from at least 3 different suppliers in 1999.
-Output:
-SELECT c.CompanyName
-FROM Customer c
-JOIN Order o ON c.Id = o.CustomerId
-JOIN OrderDetail od ON o.Id = od.OrderId
-JOIN Product p ON od.ProductId = p.Id
-WHERE o.OrderDate >= '1999-01-01' AND o.OrderDate < '2000-01-01'
-GROUP BY c.CompanyName
-HAVING COUNT(DISTINCT p.SupplierId) >= 3;
-
-Schema:
-{{ "Customer": ["Id", "CompanyName", "Country"], "Order": ["Id", "CustomerId"] }}
-User question:
-List all customers along with the number of orders they placed.
-Output:
-SELECT c.CompanyName, COUNT(o.Id) AS OrderCount
-FROM Customer c
-LEFT JOIN Order o ON c.Id = o.CustomerId
-GROUP BY c.CompanyName;
-
-Schema:
-{{ "Product": ["Id", "ProductName", "UnitsInStock"] }}
-User question:
-List the names of products that are out of stock.
-Output:
-SELECT ProductName
-FROM Product
-WHERE UnitsInStock = 0;
-
-Schema:
-{{ "Customer": ["Id", "CompanyName", "Country"], "Order": ["Id", "CustomerId", "OrderDate", "ShipVia"], "Shipper": ["Id", "CompanyName"] }}
-User question:
-Show the names and countries of all customers who placed more than 5 orders in 1997, where at least one of their orders was shipped by 'Speedy Express'.
-Output:
-SELECT c.CompanyName, c.Country
-FROM Customer c
-JOIN Order o ON c.Id = o.CustomerId
-JOIN Shipper s ON o.ShipVia = s.Id
-WHERE o.OrderDate >= '1997-01-01' AND o.OrderDate < '1998-01-01'
-  AND s.CompanyName = 'Speedy Express'
-GROUP BY c.CompanyName, c.Country
-HAVING COUNT(o.Id) > 5;
-
-Schema:
-{{ "Employee": ["Id", "FirstName", "LastName"], "EmployeeTerritory": ["EmployeeId", "TerritoryId"], "Territory": ["Id", "RegionId"], "Region": ["Id", "RegionDescription"] }}
-User question:
-Which employees work in territories that belong to the 'Western' region?
-Output:
-SELECT e.FirstName, e.LastName
-FROM Employee e
-JOIN EmployeeTerritory et ON e.Id = et.EmployeeId
-JOIN Territory t ON et.TerritoryId = t.Id
-JOIN Region r ON t.RegionId = r.Id
-WHERE r.RegionDescription = 'Western';
-
-Schema:
-{{ "Customer": ["Id", "CompanyName"], "Order": ["Id", "CustomerId"], "OrderDetail": ["OrderId", "UnitPrice", "Quantity", "Discount"] }}
-User question:
-List the top 3 customers by total purchase amount.
-Output:
-SELECT c.CompanyName, 
-       SUM(od.UnitPrice * od.Quantity * (1 - od.Discount)) AS TotalAmount
-FROM Customer c
-JOIN Order o ON c.Id = o.CustomerId
-JOIN OrderDetail od ON o.Id = od.OrderId
-GROUP BY c.CompanyName
-ORDER BY TotalAmount DESC
-LIMIT 3;
-
--------------------------
-
-Schema:
+Here is the database schema (JSON format):
 {schema}
 
-User question:
+User Question:
 {query}
 
-Output (SQL only, or 'please ask again'):
+SQL Query:
 """
-
 
 
 # Function to extract schema based on relevant tables
@@ -213,9 +75,14 @@ def clean_text(text: str):
 
 # Function to build the SQL query from prompt
 def to_sql_query(query, schema):
-    prompt = ChatPromptTemplate.from_template(sql_prompt_template)
-    chain = prompt | model
-    return clean_text(chain.invoke({"query": query, "schema": schema}))
+        prompt = sql_prompt_template.replace("{query}", query).replace("{schema}", schema)
+        try:
+            response = model.generate_content(prompt)
+            print(response.text)
+
+            return clean_text(response.text)
+        except Exception as e:
+            return f"-- Error generating SQL: {e}"
 
 
 # Load table descriptions from CSV
@@ -226,6 +93,7 @@ def get_table_details():
         details += f"Table Name: {row['Table']}\nDescription: {row['Description']}\n\n"
     return details
 
+@st.cache_data
 def get_table_embeddings():
     df = pd.read_csv("database_table_descriptions.csv")
     tables = df["Table"].tolist()
@@ -251,7 +119,7 @@ def get_relevant_tables_semantic(query: str, table_info: list, top_k: int = 7, t
 
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="NL to SQL", layout="wide")
+
 st.markdown(
     """
     <style>
@@ -323,7 +191,7 @@ if user_query:
     else:
         schema = extract_schema(db_url, only_tables=relevant_tables)
         sql = to_sql_query(user_query, schema)
-        output = f"**🧩 Relevant Tables Detected:**\n✅ {', '.join(relevant_tables)}\n\n**🧾 Generated SQL Query:**\n```sql\n{sql}\n```"
+        output = f"**🧩 Relevant Tables Detected:**\n✅ {', '.join(relevant_tables)}\n\n**🧾 Generated SQL Query:**\n{sql}"
         st.session_state.history.append(("assistant", output))
 
 # Show chat history
