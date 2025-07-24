@@ -1,3 +1,5 @@
+import os
+from dotenv import load_dotenv
 import json
 import re
 import pandas as pd
@@ -15,9 +17,9 @@ import google.generativeai as genai
 
 st.set_page_config(page_title="NL to SQL", layout="wide")
 
-# Make sure to set your real API key here
-GOOGLE_API_KEY = "AIzaSyDaR3Qhiv6uHhhpzyxocOMYmr68UvpsZwM"
-genai.configure(api_key=GOOGLE_API_KEY)
+load_dotenv()
+gemini_api_key= os.getenv("GOOGLE_API_KEY")
+genai.configure(api_key=gemini_api_key)
 
 model = genai.GenerativeModel(model_name='gemini-2.5-pro')
 
