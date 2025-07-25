@@ -76,10 +76,13 @@ def extract_schema(db_url, only_tables=None):
     return json.dumps(schema, indent=2)
 
 
-# Function to clean the LLM response
 def clean_text(text: str):
+    # Remove <think>...</think> tags
     cleaned_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Remove markdown code fences ```sql ... ```
+    cleaned_text = re.sub(r"```sql|```", "", cleaned_text, flags=re.IGNORECASE)
     return cleaned_text.strip()
+
 
 
 def build_conversational_context(history, max_turns=10):
@@ -107,7 +110,7 @@ def to_sql_query(query, schema, history):
     try:
         response = model.generate_content(prompt)
         print(response.text)
-        return clean_text(response.text)
+        return response.text
     except Exception as e:
         return f"-- Error generating SQL: {e}"
 
@@ -218,7 +221,8 @@ if user_query:
     else:
         schema = extract_schema(db_url, only_tables=relevant_tables)
         sql = to_sql_query(user_query, schema, st.session_state.history)
-
+        # Store the last SQL query in session state for later execution
+        st.session_state["last_sql"] = sql
         output = f"**🧩 Relevant Tables Detected:**\n✅ {', '.join(relevant_tables)}\n\n**🧾 Generated SQL Query:**\n{sql}"
         st.session_state.history.append(("assistant", output))
 
@@ -226,3 +230,15 @@ if user_query:
 for sender, msg in st.session_state.history:
     with st.chat_message(sender):
         st.markdown(msg)
+
+# --- Show query results ---
+if "last_sql" in st.session_state:
+    with st.expander("📊 Run SQL and Show Results"):
+        if st.button("▶️ Execute SQL Query"):
+            try:
+                engine = create_engine(db_url)
+                with engine.connect() as conn:
+                    result_df = pd.read_sql(clean_text(st.session_state["last_sql"]), conn)
+                st.dataframe(result_df)
+            except Exception as e:
+                st.error(f"❌ Error running query: {e}")
