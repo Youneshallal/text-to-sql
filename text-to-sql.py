@@ -45,6 +45,8 @@ Please follow these rules:
 3. Do not explain the query or add any commentary — just return the raw SQL query.
 4. If aggregation is needed, make sure to use appropriate `GROUP BY` clauses.
 5. Format the SQL query nicely across multiple lines.
+6. Do not use any SQL keywords that can modify the database, such as INSERT, UPDATE, DELETE, DROP, ALTER, etc.
+7. Use the `DISTINCT` keyword when necessary to avoid returning duplicate rows.
 
 Conversation History:
 {conversation_history}
@@ -57,6 +59,7 @@ Database Schema (JSON format):
 
 SQL Query:
 """
+
 
 
 
@@ -200,6 +203,7 @@ with st.expander("💡 Suggested Prompts", expanded=True):
 
 if st.button("🗑️ Clear Chat History"):
     st.session_state.history = []
+    st.session_state.last_sql = None  # <- correctly clears the stored SQL
 
 # Text input
 user_query = st.chat_input("Describe what data you want...")
@@ -213,7 +217,7 @@ if not user_query and "query_input" in st.session_state:
 if user_query:
     st.session_state.history.append(("user", user_query))
     table_info = get_table_embeddings()
-    relevant_tables = get_relevant_tables_semantic(user_query, table_info, threshold=0.2)
+    relevant_tables = get_relevant_tables_semantic(user_query, table_info, threshold=0.33)
 
 
     if not relevant_tables:
@@ -232,7 +236,7 @@ for sender, msg in st.session_state.history:
         st.markdown(msg)
 
 # --- Show query results ---
-if "last_sql" in st.session_state:
+if st.session_state.last_sql and st.session_state.last_sql.strip().lower() != "none":
     with st.expander("📊 Run SQL and Show Results"):
         if st.button("▶️ Execute SQL Query"):
             try:
