@@ -35,7 +35,9 @@ db_url = "sqlite:///northwind_small.sqlite"
 
 # SQL generation prompt template
 sql_prompt_template = """
-You are a senior database engineer. Your task is to write a syntactically correct and optimized SQL query using the provided database schema and the user's question.
+You are a senior data engineer helping users write correct and efficient SQL queries.
+
+Your task is to write a syntactically correct SQL query using the provided database schema. You must understand the user's intent and take into account the conversation history.
 
 Please follow these rules:
 1. Use only the table and column names that are explicitly listed in the schema below.
@@ -44,14 +46,19 @@ Please follow these rules:
 4. If aggregation is needed, make sure to use appropriate `GROUP BY` clauses.
 5. Format the SQL query nicely across multiple lines.
 
-Here is the database schema (JSON format):
-{schema}
+Conversation History:
+{conversation_history}
 
-User Question:
+Current User Request:
 {query}
+
+Database Schema (JSON format):
+{schema}
 
 SQL Query:
 """
+
+
 
 
 # Function to extract schema based on relevant tables
@@ -75,16 +82,34 @@ def clean_text(text: str):
     return cleaned_text.strip()
 
 
-# Function to build the SQL query from prompt
-def to_sql_query(query, schema):
-        prompt = sql_prompt_template.replace("{query}", query).replace("{schema}", schema)
-        try:
-            response = model.generate_content(prompt)
-            print(response.text)
+def build_conversational_context(history, max_turns=10):
 
-            return clean_text(response.text)
-        except Exception as e:
-            return f"-- Error generating SQL: {e}"
+    #Construit un historique conversationnel sous forme de dialogue pour le prompt.
+
+    turns = history[-max_turns:]
+    dialogue = ""
+    for sender, message in turns:
+        if sender == "user":
+            dialogue += f"User: {message}\n"
+        else:
+            # On simplifie la réponse pour éviter les blocs markdown et longs SQL dans le contexte
+            first_line = message.split('\n')[0]
+            dialogue += f"Assistant: {first_line.strip()}\n"
+    return dialogue.strip()
+
+
+# Function to build the SQL query from prompt
+def to_sql_query(query, schema, history):
+    context = build_conversational_context(history)
+    prompt = sql_prompt_template.replace("{query}", query).replace("{schema}", schema).replace("{conversation_history}",
+                                                                                               context)
+
+    try:
+        response = model.generate_content(prompt)
+        print(response.text)
+        return clean_text(response.text)
+    except Exception as e:
+        return f"-- Error generating SQL: {e}"
 
 
 # Load table descriptions from CSV
@@ -192,7 +217,8 @@ if user_query:
         st.session_state.history.append(("assistant", "⚠️ Could not detect relevant tables. Try rephrasing your question."))
     else:
         schema = extract_schema(db_url, only_tables=relevant_tables)
-        sql = to_sql_query(user_query, schema)
+        sql = to_sql_query(user_query, schema, st.session_state.history)
+
         output = f"**🧩 Relevant Tables Detected:**\n✅ {', '.join(relevant_tables)}\n\n**🧾 Generated SQL Query:**\n{sql}"
         st.session_state.history.append(("assistant", output))
 
